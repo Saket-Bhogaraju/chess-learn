@@ -55,34 +55,45 @@ function flash(id, color) {
   setTimeout(() => el.style.borderColor = '', 1200);
 }
 
-// ── Stockfish ─────────────────────────────────────────────────
-let sfResolve = null;
+// ── Stockfish via Lichess API ─────────────────────────────────
+// Uses Lichess's free cloud evaluation — no worker needed,
+// works perfectly on GitHub Pages with zero setup.
 
 function initStockfish() {
-  window.initStockfish().then(worker => {
-    worker.onmessage = function(e) {
-      const msg = e.data;
-      if (typeof msg === 'string' && msg.startsWith('bestmove') && sfResolve) {
-        const move = msg.split(' ')[1];
-        sfResolve(move);
-        sfResolve = null;
-      }
-    };
-  }).catch(e => {
-    console.error('Stockfish failed to load:', e);
-  });
+  console.log('Using Lichess cloud eval API for moves');
 }
 
-function getStockfishMove(fen, level) {
-  return new Promise((resolve) => {
-    sfResolve = resolve;
-    const depth = Math.max(1, Math.round(level * 2));
-    const skillLevel = Math.round((level - 1) * (20 / 9)); // 0–20
-    const w = window.sfWorker;
-    w.postMessage('setoption name Skill Level value ' + skillLevel);
-    w.postMessage('position fen ' + fen);
-    w.postMessage('go depth ' + depth);
-  });
+async function getStockfishMove(fen, level) {
+  try {
+    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=5`;
+    const res = await fetch(url);
+
+    if (res.ok) {
+      const data = await res.json();
+      const pvs = data.pvs;
+      if (pvs && pvs.length > 0) {
+        // Lower level = pick a worse line, higher = pick best
+        const pickIndex = Math.min(Math.floor((10 - level) / 3), pvs.length - 1);
+        const moves = pvs[pickIndex].moves.split(' ');
+        return moves[0]; // UCI format e.g. "e2e4"
+      }
+    }
+    // Fallback if position not in cloud
+    return getFallbackMove(fen, level);
+  } catch (e) {
+    console.warn('Lichess API error, using fallback:', e);
+    return getFallbackMove(fen, level);
+  }
+}
+
+function getFallbackMove(fen, level) {
+  const tempGame = new Chess(fen);
+  const moves = tempGame.moves({ verbose: true });
+  if (!moves.length) return null;
+  const shuffled = moves.sort(() => Math.random() - 0.5);
+  const poolSize = Math.max(1, Math.floor(moves.length * (11 - level) / 10));
+  const pick = shuffled[Math.floor(Math.random() * poolSize)];
+  return pick.from + pick.to + (pick.promotion || '');
 }
 
 // ── Play Board ────────────────────────────────────────────────
