@@ -335,6 +335,10 @@ function setStatus(msg) {
 
 // ── Groq AI Review ───────────────────────────────────────────
 async function requestAIReview() {
+  // Read key fresh from input in case user pasted but didn't click Save
+  const inputKey = document.getElementById('groqKey').value.trim();
+  if (inputKey) state.groqKey = inputKey;
+
   if (!state.groqKey) {
     document.getElementById('aiReview').innerHTML = `
       <div class="ai-placeholder">
@@ -347,6 +351,11 @@ async function requestAIReview() {
   const moveSummary = state.moveHistory
     .map((m, i) => `${Math.floor(i/2)+1}${m.color==='w'?'.':'...'} ${m.san}`)
     .join(' ');
+
+  if (!moveSummary) {
+    document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><p>No moves to analyse.</p></div>';
+    return;
+  }
 
   const prompt = `You are a chess coach. Analyse this game and give feedback on up to 5 of the most important moves.
 Game moves: ${moveSummary}
@@ -368,21 +377,29 @@ Return ONLY the JSON array, no other text.`;
         'Authorization': 'Bearer ' + state.groqKey,
       },
       body: JSON.stringify({
-        model: 'llama3-8b-8192',
+        model: 'llama-3.1-8b-instant',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
         max_tokens: 800,
       }),
     });
 
+    console.log('[groq] status:', res.status);
     const data = await res.json();
+    console.log('[groq] response:', data);
+
+    if (data.error) {
+      document.getElementById('aiReview').innerHTML = `<div class="ai-placeholder"><span class="ai-icon">⚠️</span><p>Groq error: ${data.error.message}</p></div>`;
+      return;
+    }
+
     const text = data.choices?.[0]?.message?.content || '[]';
     const clean = text.replace(/```json|```/g, '').trim();
     const moves = JSON.parse(clean);
     renderAIReview(moves);
   } catch (e) {
     document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><span class="ai-icon">⚠️</span><p>Could not get AI review. Check your Groq API key.</p></div>';
-    console.error(e);
+    console.error('[groq] error:', e);
   }
 }
 
