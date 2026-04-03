@@ -25,13 +25,14 @@ const state = {
 
 // ── Init ─────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
+  // Always clear any saved key from localStorage for security
+  localStorage.removeItem('groqKey');
+  document.getElementById('groqKey').value = '';
   state.groqKey = '';
-  // Do NOT load key from localStorage — users paste it fresh each session for security
 
   initPlayBoard();
   initOpeningBoard();
   loadPopularOpenings();
-  initStockfish();
 });
 
 // ── Nav ──────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ function showMode(mode) {
 function saveKey() {
   const key = document.getElementById('groqKey').value.trim();
   state.groqKey = key;
-  // Key is kept in memory only — never written to localStorage
+  // Key lives in memory only — never saved to disk
   flash('groqKey', '#4caf7d');
 }
 
@@ -55,45 +56,157 @@ function flash(id, color) {
   setTimeout(() => el.style.borderColor = '', 1200);
 }
 
-// ── Stockfish via Lichess API ─────────────────────────────────
-// Uses Lichess's free cloud evaluation — no worker needed,
-// works perfectly on GitHub Pages with zero setup.
+// ── Chess Engine (minimax with piece-square tables) ───────────
+// Runs entirely in the browser — no API, no worker, instant response.
 
-function initStockfish() {
-  console.log('Using Lichess cloud eval API for moves');
+const PIECE_VALUE = { p: 10, n: 30, b: 35, r: 50, q: 90, k: 900 };
+
+// Piece-square bonus tables (from white's perspective, rank 1→8)
+const PST = {
+  p: [
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5, 10, 10,-20,-20, 10, 10,  5,
+     5, -5,-10,  0,  0,-10, -5,  5,
+     0,  0,  0, 20, 20,  0,  0,  0,
+     5,  5, 10, 25, 25, 10,  5,  5,
+    10, 10, 20, 30, 30, 20, 10, 10,
+    50, 50, 50, 50, 50, 50, 50, 50,
+     0,  0,  0,  0,  0,  0,  0,  0,
+  ],
+  n: [
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20,  0,  5,  5,  0,-20,-40,
+    -30,  5, 10, 15, 15, 10,  5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  5, 15, 20, 20, 15,  5,-30,
+    -30,  0, 10, 15, 15, 10,  0,-30,
+    -40,-20,  0,  0,  0,  0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50,
+  ],
+  b: [
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -10, 10, 10, 10, 10, 10, 10,-10,
+    -10,  0, 10, 10, 10, 10,  0,-10,
+    -10,  5,  5, 10, 10,  5,  5,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20,
+  ],
+  r: [
+     0,  0,  0,  5,  5,  0,  0,  0,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+     5, 10, 10, 10, 10, 10, 10,  5,
+     0,  0,  0,  0,  0,  0,  0,  0,
+  ],
+  q: [
+    -20,-10,-10, -5, -5,-10,-10,-20,
+    -10,  0,  5,  0,  0,  0,  0,-10,
+    -10,  5,  5,  5,  5,  5,  0,-10,
+      0,  0,  5,  5,  5,  5,  0, -5,
+     -5,  0,  5,  5,  5,  5,  0, -5,
+    -10,  0,  5,  5,  5,  5,  0,-10,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -20,-10,-10, -5, -5,-10,-10,-20,
+  ],
+  k: [
+     20, 30, 10,  0,  0, 10, 30, 20,
+     20, 20,  0,  0,  0,  0, 20, 20,
+    -10,-20,-20,-20,-20,-20,-20,-10,
+    -20,-30,-30,-40,-40,-30,-30,-20,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+  ],
+};
+
+function squareIndex(sq) {
+  const file = sq.charCodeAt(0) - 97; // a=0..h=7
+  const rank = parseInt(sq[1]) - 1;   // 1=0..8=7
+  return rank * 8 + file;
 }
 
-async function getStockfishMove(fen, level) {
-  try {
-    const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=5`;
-    const res = await fetch(url);
-
-    if (res.ok) {
-      const data = await res.json();
-      const pvs = data.pvs;
-      if (pvs && pvs.length > 0) {
-        // Lower level = pick a worse line, higher = pick best
-        const pickIndex = Math.min(Math.floor((10 - level) / 3), pvs.length - 1);
-        const moves = pvs[pickIndex].moves.split(' ');
-        return moves[0]; // UCI format e.g. "e2e4"
-      }
+function evaluateBoard(game) {
+  const board = game.board();
+  let score = 0;
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const piece = board[r][f];
+      if (!piece) continue;
+      const type = piece.type;
+      const isWhite = piece.color === 'w';
+      const pstIndex = isWhite ? (7 - r) * 8 + f : r * 8 + f;
+      const val = PIECE_VALUE[type] + (PST[type] ? PST[type][pstIndex] / 10 : 0);
+      score += isWhite ? val : -val;
     }
-    // Fallback if position not in cloud
-    return getFallbackMove(fen, level);
-  } catch (e) {
-    console.warn('Lichess API error, using fallback:', e);
-    return getFallbackMove(fen, level);
+  }
+  return score;
+}
+
+function minimax(game, depth, alpha, beta, maximizing) {
+  if (depth === 0 || game.game_over()) return evaluateBoard(game);
+  const moves = game.moves();
+  if (maximizing) {
+    let best = -Infinity;
+    for (const m of moves) {
+      game.move(m);
+      best = Math.max(best, minimax(game, depth - 1, alpha, beta, false));
+      game.undo();
+      alpha = Math.max(alpha, best);
+      if (beta <= alpha) break;
+    }
+    return best;
+  } else {
+    let best = Infinity;
+    for (const m of moves) {
+      game.move(m);
+      best = Math.min(best, minimax(game, depth - 1, alpha, beta, true));
+      game.undo();
+      beta = Math.min(beta, best);
+      if (beta <= alpha) break;
+    }
+    return best;
   }
 }
 
-function getFallbackMove(fen, level) {
-  const tempGame = new Chess(fen);
-  const moves = tempGame.moves({ verbose: true });
-  if (!moves.length) return null;
-  const shuffled = moves.sort(() => Math.random() - 0.5);
-  const poolSize = Math.max(1, Math.floor(moves.length * (11 - level) / 10));
-  const pick = shuffled[Math.floor(Math.random() * poolSize)];
-  return pick.from + pick.to + (pick.promotion || '');
+function getStockfishMove(fen, level) {
+  return new Promise((resolve) => {
+    const tempGame = new Chess(fen);
+    const moves = tempGame.moves({ verbose: true });
+    if (!moves.length) { resolve(null); return; }
+
+    // depth 1-4 based on level; shuffle for variety at low levels
+    const depth = level <= 3 ? 1 : level <= 6 ? 2 : level <= 8 ? 3 : 4;
+    const isBlack = tempGame.turn() === 'b';
+
+    // At low levels, sometimes just pick randomly
+    const randomChance = (10 - level) * 0.07; // level1=63%, level10=0%
+    if (Math.random() < randomChance) {
+      const pick = moves[Math.floor(Math.random() * moves.length)];
+      resolve(pick.from + pick.to + (pick.promotion || ''));
+      return;
+    }
+
+    let bestMove = null;
+    let bestScore = isBlack ? Infinity : -Infinity;
+
+    for (const m of moves) {
+      tempGame.move(m);
+      const score = minimax(tempGame, depth - 1, -Infinity, Infinity, !isBlack);
+      tempGame.undo();
+      if (isBlack ? score < bestScore : score > bestScore) {
+        bestScore = score;
+        bestMove = m;
+      }
+    }
+
+    resolve(bestMove ? bestMove.from + bestMove.to + (bestMove.promotion || '') : null);
+  });
 }
 
 // ── Play Board ────────────────────────────────────────────────
@@ -168,23 +281,28 @@ function onDrop(source, target) {
 }
 
 async function makeStockfishMove() {
-  if (state.game.game_over()) return;
-  const bestMove = await getStockfishMove(state.game.fen(), state.stockfishLevel);
-  if (!bestMove || bestMove === '(none)') return;
+  console.log("[engine] called, turn=", state.game.turn(), "gameOver=", state.gameOver);
+  if (state.game.game_over()) { console.log("[engine] game over"); return; }
+
+  const fen = state.game.fen();
+  const bestMove = await getStockfishMove(fen, state.stockfishLevel);
+  console.log("[engine] bestMove=", bestMove);
+  if (!bestMove || bestMove === "(none)") { console.log("[engine] no move"); return; }
 
   const move = state.game.move({
     from: bestMove.slice(0, 2),
     to: bestMove.slice(2, 4),
-    promotion: bestMove[4] || 'q',
+    promotion: bestMove[4] || "q",
   });
-  if (!move) return;
+  console.log("[engine] applied move=", move);
+  if (!move) { console.log("[engine] illegal move"); return; }
 
   state.board.position(state.game.fen());
   state.moveHistory.push({ san: move.san, fen: state.game.fen(), color: move.color });
   updateMoveList();
 
   if (state.game.game_over()) { handleGameOver(); return; }
-  setStatus('Your turn');
+  setStatus("Your turn");
 }
 
 function handleGameOver() {
