@@ -1,0 +1,489 @@
+// ============================================================
+//  ChessMind — main.js
+// ============================================================
+
+// ── State ────────────────────────────────────────────────────
+const state = {
+  game: null,          // chess.js instance (play mode)
+  board: null,         // chessboard.js instance (play mode)
+  opGame: null,        // chess.js instance (openings mode)
+  opBoard: null,       // chessboard.js instance (openings mode)
+  playerColor: 'white',
+  stockfishLevel: 5,
+  sfWorker: null,
+  moveHistory: [],     // { san, fen, color }[]
+  groqKey: '',
+  gameOver: false,
+
+  // Openings
+  openingColor: 'white',
+  selectedOpening: null,
+  openingMoves: [],    // master move list from Lichess
+  opMoveIndex: 0,
+  currentVariation: null,
+};
+
+// ── Init ─────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  state.groqKey = localStorage.getItem('groqKey') || '';
+  if (state.groqKey) document.getElementById('groqKey').value = state.groqKey;
+
+  initPlayBoard();
+  initOpeningBoard();
+  loadPopularOpenings();
+  initStockfish();
+});
+
+// ── Nav ──────────────────────────────────────────────────────
+function showMode(mode) {
+  document.querySelectorAll('.mode').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-' + mode).classList.add('active');
+  event.target.classList.add('active');
+}
+
+function saveKey() {
+  const key = document.getElementById('groqKey').value.trim();
+  state.groqKey = key;
+  localStorage.setItem('groqKey', key);
+  flash('groqKey', '#4caf7d');
+}
+
+function flash(id, color) {
+  const el = document.getElementById(id);
+  el.style.borderColor = color;
+  setTimeout(() => el.style.borderColor = '', 1200);
+}
+
+// ── Stockfish ─────────────────────────────────────────────────
+let sfResolve = null;
+
+function initStockfish() {
+  window.initStockfish().then(worker => {
+    worker.onmessage = function(e) {
+      const msg = e.data;
+      if (typeof msg === 'string' && msg.startsWith('bestmove') && sfResolve) {
+        const move = msg.split(' ')[1];
+        sfResolve(move);
+        sfResolve = null;
+      }
+    };
+  }).catch(e => {
+    console.error('Stockfish failed to load:', e);
+  });
+}
+
+function getStockfishMove(fen, level) {
+  return new Promise((resolve) => {
+    sfResolve = resolve;
+    const depth = Math.max(1, Math.round(level * 2));
+    const skillLevel = Math.round((level - 1) * (20 / 9)); // 0–20
+    const w = window.sfWorker;
+    w.postMessage('setoption name Skill Level value ' + skillLevel);
+    w.postMessage('position fen ' + fen);
+    w.postMessage('go depth ' + depth);
+  });
+}
+
+// ── Play Board ────────────────────────────────────────────────
+function initPlayBoard() {
+  state.game = new Chess();
+  state.board = Chessboard('board', {
+    draggable: true,
+    position: 'start',
+    onDragStart: onDragStart,
+    onDrop: onDrop,
+    onSnapEnd: () => state.board.position(state.game.fen()),
+    pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+  });
+  $(window).resize(() => state.board.resize());
+}
+
+function setColor(color) {
+  state.playerColor = color;
+  document.getElementById('colorWhite').classList.toggle('active', color === 'white');
+  document.getElementById('colorBlack').classList.toggle('active', color === 'black');
+}
+
+function updateLevel(val) {
+  state.stockfishLevel = parseInt(val);
+  document.getElementById('levelDisplay').textContent = val;
+}
+
+function startGame() {
+  state.game = new Chess();
+  state.moveHistory = [];
+  state.gameOver = false;
+  state.board.start();
+  state.board.orientation(state.playerColor);
+  updateMoveList();
+  setStatus('Your turn — play as ' + state.playerColor);
+  document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><span class="ai-icon">🧠</span><p>Game in progress. AI review will appear after the game.</p></div>';
+  document.getElementById('blunderPrompt').classList.add('hidden');
+
+  if (state.playerColor === 'black') {
+    setTimeout(makeStockfishMove, 400);
+  }
+}
+
+function resignGame() {
+  if (!state.game || state.game.game_over()) return;
+  state.gameOver = true;
+  setStatus('You resigned. Requesting AI review…');
+  requestAIReview();
+}
+
+function onDragStart(source, piece) {
+  if (state.gameOver || state.game.game_over()) return false;
+  if (state.playerColor === 'white' && piece.startsWith('b')) return false;
+  if (state.playerColor === 'black' && piece.startsWith('w')) return false;
+  if (state.game.turn() !== state.playerColor[0]) return false;
+}
+
+function onDrop(source, target) {
+  const move = state.game.move({ from: source, to: target, promotion: 'q' });
+  if (!move) return 'snapback';
+
+  state.moveHistory.push({ san: move.san, fen: state.game.fen(), color: move.color });
+  updateMoveList();
+
+  if (state.game.game_over()) {
+    handleGameOver();
+    return;
+  }
+
+  setStatus('Stockfish is thinking…');
+  setTimeout(makeStockfishMove, 250);
+}
+
+async function makeStockfishMove() {
+  if (!state.sfWorker || state.game.game_over()) return;
+  const bestMove = await getStockfishMove(state.game.fen(), state.stockfishLevel);
+  if (!bestMove || bestMove === '(none)') return;
+
+  const move = state.game.move({
+    from: bestMove.slice(0, 2),
+    to: bestMove.slice(2, 4),
+    promotion: bestMove[4] || 'q',
+  });
+  if (!move) return;
+
+  state.board.position(state.game.fen());
+  state.moveHistory.push({ san: move.san, fen: state.game.fen(), color: move.color });
+  updateMoveList();
+
+  if (state.game.game_over()) { handleGameOver(); return; }
+  setStatus('Your turn');
+}
+
+function handleGameOver() {
+  let msg = 'Game over. ';
+  if (state.game.in_checkmate()) msg += state.game.turn() === 'w' ? 'Black wins!' : 'White wins!';
+  else if (state.game.in_draw()) msg += 'Draw!';
+  setStatus(msg + ' Requesting AI review…');
+  state.gameOver = true;
+  requestAIReview();
+}
+
+function updateMoveList() {
+  const moves = state.moveHistory;
+  if (!moves.length) { document.getElementById('moveList').textContent = '—'; return; }
+  let html = '';
+  for (let i = 0; i < moves.length; i += 2) {
+    const num = Math.floor(i / 2) + 1;
+    const w = moves[i] ? moves[i].san : '';
+    const b = moves[i + 1] ? moves[i + 1].san : '';
+    html += `<span style="color:var(--text-dim)">${num}.</span> ${w} ${b}<br>`;
+  }
+  const el = document.getElementById('moveList');
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(msg) {
+  document.getElementById('gameStatus').textContent = msg;
+}
+
+// ── Groq AI Review ───────────────────────────────────────────
+async function requestAIReview() {
+  if (!state.groqKey) {
+    document.getElementById('aiReview').innerHTML = `
+      <div class="ai-placeholder">
+        <span class="ai-icon">🔑</span>
+        <p>Paste your Groq API key in the top bar to get AI move analysis.</p>
+      </div>`;
+    return;
+  }
+
+  const moveSummary = state.moveHistory
+    .map((m, i) => `${Math.floor(i/2)+1}${m.color==='w'?'.':'...'} ${m.san}`)
+    .join(' ');
+
+  const prompt = `You are a chess coach. Analyse this game and give feedback on up to 5 of the most important moves.
+Game moves: ${moveSummary}
+Player was: ${state.playerColor}
+
+For each notable move respond in this JSON format:
+[
+  { "moveNum": 5, "san": "Nxe5", "quality": "blunder|mistake|good|excellent", "explanation": "short explanation" }
+]
+Return ONLY the JSON array, no other text.`;
+
+  document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><span class="loading"></span> Analysing your game…</div>';
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + state.groqKey,
+      },
+      body: JSON.stringify({
+        model: 'llama3-8b-8192',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 800,
+      }),
+    });
+
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '[]';
+    const clean = text.replace(/```json|```/g, '').trim();
+    const moves = JSON.parse(clean);
+    renderAIReview(moves);
+  } catch (e) {
+    document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><span class="ai-icon">⚠️</span><p>Could not get AI review. Check your Groq API key.</p></div>';
+    console.error(e);
+  }
+}
+
+function renderAIReview(moves) {
+  if (!moves.length) {
+    document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><p>No significant moves to highlight.</p></div>';
+    return;
+  }
+
+  let html = '';
+  let firstBlunder = null;
+
+  moves.forEach(m => {
+    const cls = (m.quality === 'blunder' || m.quality === 'mistake') ? 'blunder' : 'good';
+    const icon = m.quality === 'excellent' ? '✨' : m.quality === 'good' ? '✅' : m.quality === 'mistake' ? '⚠️' : '❌';
+    html += `<div class="ai-move-entry ${cls}">
+      <div class="ai-move-num">Move ${m.moveNum} — ${m.san} ${icon} ${m.quality.toUpperCase()}</div>
+      <div class="ai-move-text">${m.explanation}</div>
+    </div>`;
+    if (m.quality === 'blunder' && !firstBlunder) firstBlunder = m;
+  });
+
+  document.getElementById('aiReview').innerHTML = html;
+
+  // Show blunder prompt for first blunder
+  if (firstBlunder) {
+    document.getElementById('blunderMove').textContent = firstBlunder.moveNum;
+    document.getElementById('blunderPrompt').classList.remove('hidden');
+    state._blunderContext = firstBlunder;
+  }
+}
+
+function submitReason() {
+  const reason = document.getElementById('blunderReason').value.trim();
+  if (!reason) return;
+  const b = state._blunderContext;
+  const el = document.getElementById('blunderPrompt');
+  el.innerHTML = `<div class="ai-move-entry blunder">
+    <div class="ai-move-num">Your reasoning on move ${b.moveNum} — ${b.san}</div>
+    <div class="ai-move-text">You said: "${reason}"<br><br>
+    <strong>Coach:</strong> ${b.explanation}</div>
+  </div>`;
+}
+
+// ── Openings Board ────────────────────────────────────────────
+function initOpeningBoard() {
+  state.opGame = new Chess();
+  state.opBoard = Chessboard('boardOpening', {
+    draggable: false,
+    position: 'start',
+    pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+  });
+  $(window).resize(() => state.opBoard.resize());
+}
+
+function setOpeningColor(color) {
+  state.openingColor = color;
+  document.getElementById('opColorWhite').classList.toggle('active', color === 'white');
+  document.getElementById('opColorBlack').classList.toggle('active', color === 'black');
+}
+
+// ── Opening Data ──────────────────────────────────────────────
+const OPENINGS = [
+  { name: "Sicilian Defense", moves: "e4 c5", eco: "B20", desc: "The most popular reply to 1.e4. Black fights for the centre asymmetrically, leading to rich, complex positions." },
+  { name: "French Defense", moves: "e4 e6", eco: "C00", desc: "Black prepares ...d5 and accepts a cramped but solid position with counterplay on the queenside." },
+  { name: "Caro-Kann Defense", moves: "e4 c6", eco: "B10", desc: "A solid reply to 1.e4. Black aims for ...d5 and a sound pawn structure." },
+  { name: "King's Indian Defense", moves: "d4 Nf6 c4 g6", eco: "E60", desc: "Black allows White a big centre then attacks it with pieces and pawns. Rich dynamic play." },
+  { name: "Queen's Gambit", moves: "d4 d5 c4", eco: "D06", desc: "White offers a pawn to gain central control. One of the oldest and most respected openings." },
+  { name: "London System", moves: "d4 d5 Nf3 Nf6 Bf4", eco: "D02", desc: "A solid, easy-to-learn system for White. Great for beginners who want a reliable setup." },
+  { name: "Ruy Lopez", moves: "e4 e5 Nf3 Nc6 Bb5", eco: "C60", desc: "One of the oldest and most analysed openings. White pressures Black's e5 pawn indirectly." },
+  { name: "Italian Game", moves: "e4 e5 Nf3 Nc6 Bc4", eco: "C50", desc: "White targets the f7 pawn and controls the centre. Popular at all levels." },
+  { name: "Pirc Defense", moves: "e4 d6 d4 Nf6", eco: "B07", desc: "Black allows White a strong centre and counterattacks it later. Hypermodern approach." },
+  { name: "Dutch Defense", moves: "d4 f5", eco: "A80", desc: "Black fights for e4 immediately. Aggressive but slightly risky." },
+  { name: "English Opening", moves: "c4", eco: "A10", desc: "A flexible flank opening. White controls d5 and transposes into many systems." },
+  { name: "Nimzo-Indian Defense", moves: "d4 Nf6 c4 e6 Nc3 Bb4", eco: "E20", desc: "Black pins the knight and fights for central control. One of the best defences to 1.d4." },
+];
+
+function loadPopularOpenings() {
+  renderOpeningList(OPENINGS);
+}
+
+function searchOpenings(query) {
+  if (!query.trim()) { renderOpeningList(OPENINGS); return; }
+  const q = query.toLowerCase();
+  renderOpeningList(OPENINGS.filter(o => o.name.toLowerCase().includes(q) || o.eco.toLowerCase().includes(q)));
+}
+
+function renderOpeningList(list) {
+  const el = document.getElementById('openingList');
+  el.innerHTML = list.map((o, i) =>
+    `<div class="opening-item" onclick="selectOpening(${OPENINGS.indexOf(o)})">${o.name} <span style="color:var(--text-dim);font-size:0.7rem">${o.eco}</span></div>`
+  ).join('');
+}
+
+function selectOpening(idx) {
+  state.selectedOpening = OPENINGS[idx];
+  document.querySelectorAll('.opening-item').forEach((el, i) => {
+    el.classList.toggle('selected', OPENINGS.findIndex(o => o === state.selectedOpening) === i);
+  });
+  document.getElementById('openingName').textContent = state.selectedOpening.name;
+  document.getElementById('openingDesc').textContent = state.selectedOpening.desc;
+  document.getElementById('openingInfo').classList.remove('hidden');
+}
+
+async function startOpeningTrainer() {
+  if (!state.selectedOpening) return;
+
+  state.opGame = new Chess();
+  state.opBoard.start();
+  state.opBoard.orientation(state.openingColor);
+  state.opMoveIndex = 0;
+  state.openingMoves = [];
+  state.currentVariation = null;
+
+  document.getElementById('openingStatus').textContent = 'Loading opening from Lichess…';
+  document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><span class="loading"></span> Fetching variations…</div>';
+
+  // Fetch from Lichess opening explorer
+  const moves = state.selectedOpening.moves.split(' ');
+  await fetchLichessVariations(moves.join(','));
+}
+
+async function fetchLichessVariations(play) {
+  try {
+    const url = `https://explorer.lichess.ovh/masters?play=${encodeURIComponent(play)}&topGames=0&recentGames=0`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    // Apply the opening moves to the board
+    const movesArr = state.selectedOpening.moves.split(' ');
+    state.opGame = new Chess();
+    for (const m of movesArr) {
+      state.opGame.move(m);
+    }
+    state.opBoard.position(state.opGame.fen());
+    state.opMoveIndex = movesArr.length;
+    state.openingMoves = movesArr;
+
+    document.getElementById('openingStatus').textContent =
+      `${state.selectedOpening.name} loaded. ${data.moves?.length || 0} continuations found.`;
+
+    renderVariations(data.moves || []);
+  } catch (e) {
+    document.getElementById('openingStatus').textContent = 'Could not load Lichess data. Check your connection.';
+    console.error(e);
+  }
+}
+
+function renderVariations(moves) {
+  if (!moves.length) {
+    document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><p>No variations found for this position.</p></div>';
+    return;
+  }
+
+  const total = moves.reduce((s, m) => s + m.white + m.draws + m.black, 0) || 1;
+  let html = '<div style="font-size:0.7rem;color:var(--text-dim);font-family:DM Mono,monospace;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.08em">Master game continuations</div>';
+
+  moves.slice(0, 8).forEach(m => {
+    const pct = Math.round((m.white + m.draws + m.black) / total * 100);
+    html += `<div class="variation-item" onclick="playVariation('${m.san}')">
+      <span>${m.san}</span>
+      <span class="variation-freq">${pct}% of games</span>
+    </div>`;
+  });
+
+  document.getElementById('variationPanel').innerHTML = html;
+}
+
+function playVariation(san) {
+  const move = state.opGame.move(san);
+  if (!move) return;
+  state.opBoard.position(state.opGame.fen());
+  state.openingMoves.push(san);
+  state.opMoveIndex++;
+  document.getElementById('openingStatus').textContent = `Played: ${san}`;
+
+  // Fetch next variations
+  fetchLichessVariations(state.openingMoves.join(','));
+
+  // Explain move
+  explainMove(san, state.opGame.fen());
+}
+
+function nextOpeningMove() {
+  // Let user freely explore: just show they can click variations
+  document.getElementById('openingStatus').textContent = 'Click a variation on the right to continue, or use Back to undo.';
+}
+
+function prevOpeningMove() {
+  if (state.openingMoves.length === 0) return;
+  state.opGame.undo();
+  state.openingMoves.pop();
+  state.opMoveIndex = Math.max(0, state.opMoveIndex - 1);
+  state.opBoard.position(state.opGame.fen());
+  document.getElementById('openingStatus').textContent = 'Went back one move.';
+  fetchLichessVariations(state.openingMoves.join(','));
+  document.getElementById('moveExplain').classList.add('hidden');
+}
+
+async function explainMove(san, fen) {
+  const el = document.getElementById('moveExplain');
+  el.classList.remove('hidden');
+  el.innerHTML = '<span class="loading"></span> Explaining move…';
+
+  if (!state.groqKey) {
+    el.innerHTML = `<strong>${san}</strong> — Add your Groq API key to get move explanations.`;
+    return;
+  }
+
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + state.groqKey,
+      },
+      body: JSON.stringify({
+        model: 'llama3-8b-8192',
+        messages: [{
+          role: 'user',
+          content: `In 2-3 sentences, explain WHY chess players play ${san} in this opening position. Focus on the strategic idea, not just what the move does literally. Be concise and beginner-friendly.`
+        }],
+        temperature: 0.5,
+        max_tokens: 150,
+      }),
+    });
+    const data = await res.json();
+    const explanation = data.choices?.[0]?.message?.content || 'No explanation available.';
+    el.innerHTML = `<strong>${san}</strong> — ${explanation}`;
+  } catch {
+    el.innerHTML = `<strong>${san}</strong> — Could not load explanation.`;
+  }
+}

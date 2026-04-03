@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ChessMind — Learn & Play</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+  <!-- Chess libraries -->
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <div class="nav-logo">♟ ChessMind</div>
+    <div class="nav-links">
+      <button class="nav-btn active" onclick="showMode('play')">Play</button>
+      <button class="nav-btn" onclick="showMode('openings')">Openings</button>
+    </div>
+    <div class="nav-key">
+      <input type="text" id="groqKey" placeholder="Paste Groq API key…" />
+      <button onclick="saveKey()">Save</button>
+    </div>
+  </nav>
+
+  <!-- ===== PLAY MODE ===== -->
+  <section id="mode-play" class="mode active">
+    <div class="play-layout">
+
+      <!-- Left: controls -->
+      <div class="panel panel-left">
+        <h2 class="panel-title">Game Setup</h2>
+
+        <label class="setting-label">Play as</label>
+        <div class="toggle-group">
+          <button class="toggle active" id="colorWhite" onclick="setColor('white')">White</button>
+          <button class="toggle" id="colorBlack" onclick="setColor('black')">Black</button>
+        </div>
+
+        <label class="setting-label">Stockfish Level <span id="levelDisplay">5</span></label>
+        <input type="range" min="1" max="10" value="5" id="diffSlider" oninput="updateLevel(this.value)">
+        <div class="level-labels">
+          <span>Beginner</span><span>Expert</span>
+        </div>
+
+        <button class="btn-primary" onclick="startGame()">Start Game</button>
+        <button class="btn-secondary" onclick="resignGame()">Resign</button>
+
+        <div class="divider"></div>
+
+        <div class="move-list-wrap">
+          <h3 class="section-label">Moves</h3>
+          <div id="moveList" class="move-list">—</div>
+        </div>
+      </div>
+
+      <!-- Center: board -->
+      <div class="board-wrap">
+        <div id="board"></div>
+        <div id="gameStatus" class="game-status">Press "Start Game" to begin</div>
+      </div>
+
+      <!-- Right: AI review -->
+      <div class="panel panel-right">
+        <h2 class="panel-title">AI Coach</h2>
+        <div id="aiReview" class="ai-review">
+          <div class="ai-placeholder">
+            <span class="ai-icon">🧠</span>
+            <p>Your AI coach will analyse each move here after the game ends.</p>
+          </div>
+        </div>
+        <div id="blunderPrompt" class="blunder-prompt hidden">
+          <p class="blunder-label">⚠️ Possible blunder detected on move <span id="blunderMove"></span>. What was your reasoning?</p>
+          <textarea id="blunderReason" placeholder="Explain your thinking…"></textarea>
+          <button class="btn-primary" onclick="submitReason()">Submit</button>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ===== OPENINGS MODE ===== -->
+  <section id="mode-openings" class="mode">
+    <div class="openings-layout">
+
+      <!-- Left: opening picker -->
+      <div class="panel panel-left">
+        <h2 class="panel-title">Opening Trainer</h2>
+
+        <label class="setting-label">Play as</label>
+        <div class="toggle-group">
+          <button class="toggle active" id="opColorWhite" onclick="setOpeningColor('white')">White</button>
+          <button class="toggle" id="opColorBlack" onclick="setOpeningColor('black')">Black</button>
+        </div>
+
+        <label class="setting-label">Search Opening</label>
+        <input type="text" id="openingSearch" class="text-input" placeholder="e.g. Sicilian, London…" oninput="searchOpenings(this.value)">
+
+        <div id="openingList" class="opening-list"></div>
+
+        <div class="divider"></div>
+
+        <div id="openingInfo" class="opening-info hidden">
+          <h3 id="openingName" class="opening-name"></h3>
+          <p id="openingDesc" class="opening-desc"></p>
+          <button class="btn-primary" onclick="startOpeningTrainer()">Practice This</button>
+        </div>
+      </div>
+
+      <!-- Center: board -->
+      <div class="board-wrap">
+        <div id="boardOpening"></div>
+        <div id="openingStatus" class="game-status">Select an opening to begin</div>
+        <div class="opening-nav">
+          <button class="btn-secondary" onclick="prevOpeningMove()">← Back</button>
+          <button class="btn-primary" onclick="nextOpeningMove()">Next →</button>
+        </div>
+      </div>
+
+      <!-- Right: variations + explanation -->
+      <div class="panel panel-right">
+        <h2 class="panel-title">Variations</h2>
+        <div id="variationPanel" class="variation-panel">
+          <div class="ai-placeholder">
+            <span class="ai-icon">📖</span>
+            <p>After you select an opening, variations from real Lichess games will appear here. Click any to explore.</p>
+          </div>
+        </div>
+        <div id="moveExplain" class="move-explain hidden"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <script src="js/stockfish-loader.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
