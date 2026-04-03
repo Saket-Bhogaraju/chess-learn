@@ -394,8 +394,12 @@ Return ONLY the JSON array, no other text.`;
     }
 
     const text = data.choices?.[0]?.message?.content || '[]';
-    const clean = text.replace(/```json|```/g, '').trim();
-    const moves = JSON.parse(clean);
+    console.log('[groq] raw text:', text);
+    // Robustly extract JSON array from response
+    const match = text.match(/\[[\s\S]*\]/);
+    const clean = match ? match[0] : '[]';
+    let moves = [];
+    try { moves = JSON.parse(clean); } catch(pe) { console.error('[groq] parse error:', pe); }
     renderAIReview(moves);
   } catch (e) {
     document.getElementById('aiReview').innerHTML = '<div class="ai-placeholder"><span class="ai-icon">⚠️</span><p>Could not get AI review. Check your Groq API key.</p></div>';
@@ -536,11 +540,13 @@ async function startOpeningTrainer() {
 }
 
 async function fetchLichessVariations() {
-  // Use FEN of current position to query Lichess explorer
   const fen = state.opGame.fen();
   try {
-    const url = `https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}&topGames=0&recentGames=0&moves=10`;
-    const res = await fetch(url);
+    // Use lichess opening explorer (no auth needed, works from browser)
+    const url = `https://explorer.lichess.ovh/lichess?fen=${encodeURIComponent(fen)}&topGames=0&recentGames=0&moves=10&ratings=2000,2200,2500`;
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json' }
+    });
 
     if (!res.ok) throw new Error('Lichess API returned ' + res.status);
 
