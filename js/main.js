@@ -25,8 +25,8 @@ const state = {
 
 // ── Init ─────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  state.groqKey = localStorage.getItem('groqKey') || '';
-  if (state.groqKey) document.getElementById('groqKey').value = state.groqKey;
+  state.groqKey = '';
+  // Do NOT load key from localStorage — users paste it fresh each session for security
 
   initPlayBoard();
   initOpeningBoard();
@@ -45,7 +45,7 @@ function showMode(mode) {
 function saveKey() {
   const key = document.getElementById('groqKey').value.trim();
   state.groqKey = key;
-  localStorage.setItem('groqKey', key);
+  // Key is kept in memory only — never written to localStorage
   flash('groqKey', '#4caf7d');
 }
 
@@ -168,7 +168,7 @@ function onDrop(source, target) {
 }
 
 async function makeStockfishMove() {
-  if (!state.sfWorker || state.game.game_over()) return;
+  if (state.game.game_over()) return;
   const bestMove = await getStockfishMove(state.game.fen(), state.stockfishLevel);
   if (!bestMove || bestMove === '(none)') return;
 
@@ -372,61 +372,73 @@ function selectOpening(idx) {
 async function startOpeningTrainer() {
   if (!state.selectedOpening) return;
 
+  // Reset everything
   state.opGame = new Chess();
-  state.opBoard.start();
-  state.opBoard.orientation(state.openingColor);
-  state.opMoveIndex = 0;
   state.openingMoves = [];
-  state.currentVariation = null;
+  state.opMoveIndex = 0;
+  state.opBoard.orientation(state.openingColor);
+  state.opBoard.position('start');
 
   document.getElementById('openingStatus').textContent = 'Loading opening from Lichess…';
   document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><span class="loading"></span> Fetching variations…</div>';
+  document.getElementById('moveExplain').classList.add('hidden');
 
-  // Fetch from Lichess opening explorer
-  const moves = state.selectedOpening.moves.split(' ');
-  await fetchLichessVariations(moves.join(','));
+  // Play the opening moves onto the board first
+  const movesArr = state.selectedOpening.moves.split(' ');
+  for (const m of movesArr) {
+    const result = state.opGame.move(m);
+    if (!result) {
+      document.getElementById('openingStatus').textContent = 'Error loading opening moves.';
+      return;
+    }
+    state.openingMoves.push(m);
+  }
+  state.opBoard.position(state.opGame.fen());
+  state.opMoveIndex = movesArr.length;
+
+  // Now fetch variations from this position
+  await fetchLichessVariations();
 }
 
-async function fetchLichessVariations(play) {
+async function fetchLichessVariations() {
+  // Use FEN of current position to query Lichess explorer
+  const fen = state.opGame.fen();
   try {
-    const url = `https://explorer.lichess.ovh/masters?play=${encodeURIComponent(play)}&topGames=0&recentGames=0`;
+    const url = `https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}&topGames=0&recentGames=0&moves=10`;
     const res = await fetch(url);
-    const data = await res.json();
 
-    // Apply the opening moves to the board
-    const movesArr = state.selectedOpening.moves.split(' ');
-    state.opGame = new Chess();
-    for (const m of movesArr) {
-      state.opGame.move(m);
-    }
-    state.opBoard.position(state.opGame.fen());
-    state.opMoveIndex = movesArr.length;
-    state.openingMoves = movesArr;
+    if (!res.ok) throw new Error('Lichess API returned ' + res.status);
+
+    const data = await res.json();
+    const movesFound = data.moves || [];
 
     document.getElementById('openingStatus').textContent =
-      `${state.selectedOpening.name} loaded. ${data.moves?.length || 0} continuations found.`;
+      `${state.selectedOpening.name} — move ${state.opMoveIndex}. ${movesFound.length} continuations found.`;
 
-    renderVariations(data.moves || []);
+    renderVariations(movesFound);
   } catch (e) {
-    document.getElementById('openingStatus').textContent = 'Could not load Lichess data. Check your connection.';
+    document.getElementById('openingStatus').textContent = 'Could not load Lichess data.';
+    document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><span class="ai-icon">⚠️</span><p>Could not reach Lichess. Check your connection.</p></div>';
     console.error(e);
   }
 }
 
 function renderVariations(moves) {
   if (!moves.length) {
-    document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><p>No variations found for this position.</p></div>';
+    document.getElementById('variationPanel').innerHTML = '<div class="ai-placeholder"><p>No variations found — you\'ve reached the edge of the database!</p></div>';
     return;
   }
 
-  const total = moves.reduce((s, m) => s + m.white + m.draws + m.black, 0) || 1;
-  let html = '<div style="font-size:0.7rem;color:var(--text-dim);font-family:DM Mono,monospace;margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.08em">Master game continuations</div>';
+  const total = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0) || 1;
+  let html = '<div style="font-size:0.7rem;color:var(--text-dim);font-family:DM Mono,monospace;margin-bottom:0.6rem;text-transform:uppercase;letter-spacing:0.08em">Master game continuations</div>';
 
   moves.slice(0, 8).forEach(m => {
-    const pct = Math.round((m.white + m.draws + m.black) / total * 100);
+    const games = (m.white || 0) + (m.draws || 0) + (m.black || 0);
+    const pct = Math.round(games / total * 100);
+    const wPct = games ? Math.round((m.white || 0) / games * 100) : 0;
     html += `<div class="variation-item" onclick="playVariation('${m.san}')">
       <span>${m.san}</span>
-      <span class="variation-freq">${pct}% of games</span>
+      <span class="variation-freq">↑${wPct}% · ${pct}% of games</span>
     </div>`;
   });
 
@@ -435,22 +447,21 @@ function renderVariations(moves) {
 
 function playVariation(san) {
   const move = state.opGame.move(san);
-  if (!move) return;
+  if (!move) {
+    console.warn('Invalid move:', san);
+    return;
+  }
   state.opBoard.position(state.opGame.fen());
   state.openingMoves.push(san);
   state.opMoveIndex++;
-  document.getElementById('openingStatus').textContent = `Played: ${san}`;
+  document.getElementById('openingStatus').textContent = `Played: ${san} — fetching continuations…`;
 
-  // Fetch next variations
-  fetchLichessVariations(state.openingMoves.join(','));
-
-  // Explain move
-  explainMove(san, state.opGame.fen());
+  fetchLichessVariations();
+  explainMove(san);
 }
 
 function nextOpeningMove() {
-  // Let user freely explore: just show they can click variations
-  document.getElementById('openingStatus').textContent = 'Click a variation on the right to continue, or use Back to undo.';
+  document.getElementById('openingStatus').textContent = 'Click any variation on the right to continue.';
 }
 
 function prevOpeningMove() {
@@ -460,19 +471,22 @@ function prevOpeningMove() {
   state.opMoveIndex = Math.max(0, state.opMoveIndex - 1);
   state.opBoard.position(state.opGame.fen());
   document.getElementById('openingStatus').textContent = 'Went back one move.';
-  fetchLichessVariations(state.openingMoves.join(','));
   document.getElementById('moveExplain').classList.add('hidden');
+  fetchLichessVariations();
 }
 
-async function explainMove(san, fen) {
+async function explainMove(san) {
   const el = document.getElementById('moveExplain');
   el.classList.remove('hidden');
-  el.innerHTML = '<span class="loading"></span> Explaining move…';
 
   if (!state.groqKey) {
-    el.innerHTML = `<strong>${san}</strong> — Add your Groq API key to get move explanations.`;
+    el.innerHTML = `<strong>${san}</strong> — Paste your Groq API key in the top bar to get move explanations.`;
     return;
   }
+
+  el.innerHTML = `<span class="loading"></span> Explaining <strong>${san}</strong>…`;
+
+  const moveContext = state.openingMoves.join(' ');
 
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -485,9 +499,11 @@ async function explainMove(san, fen) {
         model: 'llama3-8b-8192',
         messages: [{
           role: 'user',
-          content: `In 2-3 sentences, explain WHY chess players play ${san} in this opening position. Focus on the strategic idea, not just what the move does literally. Be concise and beginner-friendly.`
+          content: `In the chess opening after the moves: ${moveContext}
+The move ${san} was just played.
+In 2-3 short sentences, explain the strategic IDEA behind ${san}. Why do strong players choose this move? What does it accomplish? Be beginner-friendly and concrete.`
         }],
-        temperature: 0.5,
+        temperature: 0.4,
         max_tokens: 150,
       }),
     });
